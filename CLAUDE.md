@@ -4,52 +4,104 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Vue 3 mobile-first food menu application that displays meals from TheMealDB API. The app allows users to browse meals, view details, and save favorites to localStorage.
+TastyExplorer (美味探索家) is a Vue 3 mobile-first food menu application that displays international meals from TheMealDB API with Chinese-English bilingual support. The app features batch importing, intelligent translation, offline caching, and favorites management.
+
+## Development Commands
+
+```bash
+npm install          # Install dependencies
+npm run dev          # Start dev server (http://localhost:3000)
+npm run build        # Build for production
+npm run preview      # Preview production build
+```
 
 ## Architecture
 
 ### Core Technology Stack
 - **Vue 3** with Composition API (`<script setup>`)
 - **Vue Router** with hash history mode
+- **Vite** 5.0+ as build tool
 - **Axios** for API requests
-- No state management library (uses localStorage for favorites, local state for other data)
+- No state management library (uses localStorage for persistent data)
 
 ### Key Architectural Patterns
 
-**API Layer**: Centralized in `src/api/food.js` using axios. Currently contains a single endpoint that fetches meal data from TheMealDB external API.
+**Batch Import System** ([src/api/food.js](src/api/food.js)):
+- Fetches meals by searching 20 first letters (a-z) in parallel using `search.php?f={letter}`
+- Uses `Promise.all()` for concurrent requests
+- Deduplicates using Map with `idMeal` as key
+- Randomizes and returns top 200 meals
+- Implements localStorage caching with keys `foodMenuCache` and `foodMenuCacheTime`
 
-**Routing Structure**: Three main routes defined in `src/router/index.js`:
-- `/` - Home page with meal list
-- `/detail/:id` - Detail view for individual meal (receives meal ID as route param)
-- `/favorite` - User's saved favorites
+**Translation System**:
+- **Local Dictionary** ([src/utils/translate.js](src/utils/translate.js)): 200+ meal names, 300+ ingredients, categories, and areas
+- **Dual API Fallback** ([src/utils/translationAPI.js](src/utils/translationAPI.js)): MyMemory API (primary) → LibreTranslate (fallback)
+- **In-memory Cache**: Map-based cache to avoid redundant API calls
+- **Translation Functions**: `translateMealName()`, `translateCategory()`, `translateArea()`, `translateIngredient()`
+- Strategy: Check local dictionary first, then call API, return original text on failure
 
 **Data Flow**:
-- Home view fetches data from API on mount, stores in local ref
-- FoodCard component receives food data as props and navigates to detail on click
-- Favorite system uses localStorage with key 'favorites', storing full meal objects as JSON
-- Detail view receives meal ID via route params
+1. Home view checks cache on mount → if empty, triggers batch import
+2. Batch import fetches from 20 API endpoints in parallel → dedupes → caches → displays
+3. Meal names translated asynchronously after display
+4. Detail view receives `idMeal` via route param → fetches full details → translates all fields (name, category, area, ingredients 1-20, instructions)
+5. Favorites stored in localStorage with key `'favorites'` as array of full meal objects
+6. Cross-component sync via `storage` event on localStorage changes
+
+**Routing Structure** ([src/router/index.js](src/router/index.js)):
+- `/` - Home page with meal list
+- `/detail/:id` - Detail view (expects `idMeal` as route param)
+- `/favorite` - Favorites list
 
 **Component Organization**:
-- `views/` - Page-level components that handle data fetching and business logic
-- `components/` - Reusable UI components (FoodCard, TabBar)
-- Views are responsible for fetching data; components are presentational
+- `views/Home.vue` - Handles batch import, caching, displays meal grid
+- `views/Detail.vue` - Fetches meal by ID, translates all fields, parses 20 ingredient/measure pairs
+- `views/Favorite.vue` - Reads from localStorage `'favorites'` key
+- `components/FoodCard.vue` - Presentational card, receives meal as prop
+- `components/TabBar.vue` - Bottom navigation with Home/Favorite/Import tabs
+
+**API Integration**:
+- Base URL: `https://www.themealdb.com/api/json/v1/1`
+- Batch fetch: `GET /search.php?f={letter}` for letters a-z (20 requests)
+- Detail fetch: `GET /lookup.php?i={idMeal}`
+
+### State Management Pattern
+- No Vuex/Pinia - uses local component state with `ref()` and `reactive()`
+- Persistent data in localStorage:
+  - `'favorites'`: Array of meal objects
+  - `'foodMenuCache'`: Array of 200 meals
+  - `'foodMenuCacheTime'`: Timestamp of cache creation
+- Translation cache: In-memory Map in `translationAPI.js`
+- Cross-component updates: `window.dispatchEvent(new Event('storage'))` + `addEventListener('storage')`
 
 ### Styling
 - Global styles in `src/assets/style.css`
-- Component-specific styles use scoped CSS
-- Mobile-first design with viewport meta tag set in index.html
+- Scoped component styles
+- Mobile-first responsive design
+- No external UI library - pure CSS
 
-### State Management Pattern
-- No Vuex/Pinia - uses local component state with Vue 3 ref()
-- Persistent data (favorites) stored in localStorage
-- Each view manages its own loading/error states independently
+## Important Implementation Details
 
-## Important Notes
+**Favorites Cross-Component Sync**:
+When toggling favorites in Detail view, code must dispatch storage event: `localStorage.setItem('favorites', JSON.stringify(favorites)); window.dispatchEvent(new Event('storage'));`
+Home/Favorite views listen via `window.addEventListener('storage', loadFavorites)`.
 
-**Favorites Feature**: The app stores entire meal objects in localStorage under the 'favorites' key. When modifying favorite functionality, ensure you're reading/writing the correct data structure (array of meal objects with at least `idMeal` and `strMeal` properties).
+**Ingredient Parsing**:
+TheMealDB returns ingredients in 20 separate fields (`strIngredient1` to `strIngredient20` + `strMeasure1` to `strMeasure20`). Detail view loops through these fields, filters empty values, translates each ingredient name, and pairs with measures.
 
-**External API Dependency**: The app depends on TheMealDB API (themealdb.com). The API call in `src/api/food.js` searches for all meals with empty search parameter.
+**Cache Strategy**:
+`getFoodList(forceRefresh)` in [src/api/food.js](src/api/food.js) checks `forceRefresh` flag. If false, returns cached data. If true or no cache, calls `fetchFoodListFromAPI()` and saves to localStorage. "Import Menu" button in TabBar clears cache via `clearFoodCache()`.
 
-**Router Navigation**: FoodCard components handle navigation programmatically using `$router.push()`. Detail route expects numeric meal ID from the API.
+**Translation Fallback Chain**:
+1. Check local dictionary in `translate.js`
+2. Try MyMemory API (1000 requests/day limit)
+3. Fall back to LibreTranslate API
+4. Return original English text if all fail
 
-**Error Handling**: Views implement try-catch with loading states and display errors via alert() and inline error messages.
+**API Considerations**:
+- TheMealDB free tier has no rate limits but can be slow
+- Translation APIs are free but have daily limits
+- Always implement graceful degradation (show English on translation failure)
+
+**Error Handling**:
+Views use try-catch with loading states. Errors display via `alert()` and inline error messages. API failures should not crash the app.
